@@ -1,0 +1,714 @@
+---
+title: "03-prep-global-gridded.Rmd"
+author: "Whitney Friedman"
+date: "2/28/2022"
+output: html_document
+---
+
+# 03 Prep Globally Gridded Datasets
+Prep global variables in order to extend the final 
+'coral counterfactual' model to gridded coral reef cells from 
+local reef pressures (https://github.com/WCS-Marine/local-reef-pressures)
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+```{r eval = TRUE, message=FALSE, warning=FALSE}
+library(here)
+source(here("globalprep","analysis","coral-counterfactual","00-load-cc-libraries.R"))
+source(here("globalprep","analysis","coral-counterfactual","00-load-cc-functions.R"))
+```
+
+# ALT - load data
+- instead of running below
+- mostly for coding purposes...
+```{r eval=FALSE, include=TRUE}
+load(here("globalprep","analysis","coral-counterfactual", "03-prep-global-gridded.Rdata"))
+```
+
+# Overlay grids
+Overlay spatial layers
+Extract spatial data using LRP grid cells
+
+## Load LRP grid cells (base layer)
+
+Andrello et al 2021 - local reef pressures
+- 5km polygons (only for reef areas) with values for impacts on  coral reefs
+- See (https://programs.wcs.org/vibrantoceans/Map)
+
+- paper: (https://www.biorxiv.org/content/10.1101/2021.04.03.438313v1)
+- download data & see readme at: (https://github.com/WCS-Marine/local-reef-pressures)- 
+- also  see 'key.xlsx' for variable names and descriptions
+
+```{r}
+
+allreefs_info <- read_excel(here("globalprep", "analysis", "coral-counterfactual","data_dl",
+          "wcs-local-reef-pressures","key.xlsx"))
+
+allreefs_info
+
+# load dataset (original allreefs.Rdata transformed using "01-format-allreefs.R")
+
+load(here("globalprep", "analysis", "coral-counterfactual","data_dl",
+                                 "wcs-local-reef-pressures", "allreefs_WGS84.RData"))
+
+allreefs
+#plot(allreefs, max.plot = 1)
+
+```
+
+## Load habitat data (ACA)
+Habitat data from Allen Coral Atlas (ACA); extracted per LRP cell
+(by: globalprep/ecological-data/fetch_aca_square/fetch_aca.py), formatted by
+01-format-aca-gridded.R. 
+
+Files output from 01-format-aca-gridded.R: 
+
+- allreefs_aca.csv	Full table of ACA data within each LRP cell. Unique rows are cell-aca_type-aca_class. Area of each aca class within each cell is recorded, as well as the proportion of each class over the total area mapped. 
+
+- allreefs_aca_geo_simple.csv	By LRP cell, the proportion of simplified geomorphic category per cell (bank, lagoon, slope, crest)
+
+- allreefs_aca_seagrass.csv	The proportion of seagrass per LRP cell with any recorded benthic data (41,991 / 54,596 cells)
+
+- allreefs_aca_top_benthic.csv	Top benthic class per LRP cell. One line per cell for which benthic data was available through ACA (41,991 / 54,596) cells. 
+
+- allreefs_aca_top_geo_simple.csv	Top *simplified* geomorphic class ("aca_group") per LRP cell. One line per cell for which geomorphic data was available through ACA (42,623 / 54,596) cells. 
+
+- allreefs_aca_top_geo.csv	Top geomorphic class per LRP cell. One line per cell for which geomorphic data was available through ACA (42,623 / 54,596) cells. 
+
+```{r}
+allreefs_top_geo <- read_csv(here("globalprep", "analysis", "coral-counterfactual",
+                 "outputs","allreefs_aca_top_geo_simple.csv"),
+                 col_types = c("c", "c","d", "d", "d")) %>% 
+  select(OBJECTID, top_geo_simple) %>% 
+  rename(aca_top_geo_simple = top_geo_simple)
+
+allreefs_top_geo
+
+allreefs_simple_geo <- read_csv(here("globalprep", "analysis", "coral-counterfactual",
+                 "outputs","allreefs_aca_geo_simple.csv"),
+                 col_types = c("c", "d","d", "d", "d"))
+
+allreefs_simple_geo
+
+allreefs_seagrass <- read_csv(here("globalprep", "analysis", "coral-counterfactual",
+                 "outputs","allreefs_aca_seagrass.csv"),
+                 col_types = c("c", "d", "d", "d")) %>% 
+  select(OBJECTID, pr_seagrass) %>%
+  rename(aca_pr_seagrass = pr_seagrass)
+
+allreefs_seagrass
+
+allreefs_aca <- allreefs_top_geo %>% 
+  left_join(allreefs_simple_geo, by = "OBJECTID") %>% 
+  left_join(allreefs_seagrass, by = "OBJECTID")
+
+allreefs_aca
+
+```
+
+## Load depth estimates (GEBCO)
+
+- GEBCO Compilation Group (2022) GEBCO_2022 Grid (doi:10.5285/e0f0bb80-ab44-2739-e053-6c86abc0289c)
+- https://www.gebco.net/data_and_products/gridded_bathymetry_data/#global
+- Depths are median depths where depth is <= 0 (marine depth only)
+
+```{r}
+allreefs_depth <- read_sf(here("globalprep","analysis","coral-counterfactual",
+          "outputs", "allreefs_gebco.geojson"))
+
+allreefs_depth$gebco_depth %>% hist()
+
+allreefs_depth
+```
+
+
+
+
+## Load country data
+spatial joins: 
+- https://mentin.medium.com/which-predicate-cb608b470471
+- https://geocompr.robinlovelace.net/spatial-operations.html
+
+```{r}
+eez <- st_read(here("globalprep","analysis","mapping","map_data",
+             "World_EEZ_v11","eez_v11.shp")) %>% 
+  select(GEONAME, ISO_TER1, TERRITORY1) %>% 
+  st_transform(crs = 4326)
+
+
+lrp <- allreefs
+
+# Join lrp with country eez 
+# WARNING: "although coordinates are longitude/latitude, st_intersects assumes that they are planar"
+
+# Fixes "Evaluation error: Found 2 features with invalid spherical geometry"
+sf::sf_use_s2(FALSE) 
+
+# St_join: 
+lrp_country  <- st_join(lrp, eez)
+
+lrp_country %>% tabyl(TERRITORY1)
+lrp_country %>% distinct(OBJECTID, .keep_all = T)
+
+allreefs_country <- lrp_country %>% 
+  distinct(OBJECTID, .keep_all = T) %>% 
+  rename(eez = GEONAME, 
+         country_iso = ISO_TER1, 
+         country = TERRITORY1)
+
+allreefs_country <- allreefs_country %>% 
+  select(OBJECTID, eez:geometry)
+
+rm(lrp_country, lrp, eez)
+
+# NOTE: 94 NA's
+allreefs_country %>% tabyl(country)
+
+#allreefs_country %>% 
+#  filter(is.na(country))
+```
+
+## Load ecoregions & provinces
+
+Align ecoregions and provinces from: 
+
+Mark D. Spalding, Helen E. Fox, Gerald R. Allen, Nick Davidson, Zach A. Ferdaña, Max Finlayson, Benjamin S. Halpern, Miguel A. Jorge, Al Lombana, Sara A. Lourie, Kirsten D. Martin, Edmund McManus, Jennifer Molnar, Cheri A. Recchia, James Robertson, Marine Ecoregions of the World: A Bioregionalization of Coastal and Shelf Areas, BioScience, Volume 57, Issue 7, July 2007, Pages 573–583, https://doi.org/10.1641/B570707
+
+```{r}
+meow <- st_read(here("globalprep","analysis","coral-counterfactual","data_dl",
+             "wwf-meow","meow_ecos.shp")) %>% 
+  select(ECOREGION, PROVINCE, REALM, Lat_Zone) %>% 
+  clean_names()
+
+
+
+# Join lrp with marine ecoregions
+lrp <- allreefs
+sf::sf_use_s2(FALSE) # Fixes "Evaluation error: Found 2 features with invalid spherical geometry"
+
+# St_join (warning is OK)
+lrp_meow  <- st_join(lrp, meow)
+
+lrp_meow %>% tabyl(ecoregion) # 27 are NA
+lrp_meow %>% tabyl(province) # 27 are NA
+
+allreefs_meow <- lrp_meow %>% 
+  arrange(ecoregion) %>% 
+  distinct(OBJECTID, .keep_all = T) %>% 
+  select(OBJECTID, ecoregion:realm)
+
+allreefs_meow
+
+rm(lrp_meow, lrp) # keep 'meow' for now
+
+# NOTE: 27 NA's
+allreefs_meow$province %>% tabyl()
+
+```
+
+
+
+## Load MPA data
+
+MPA data downloaded on 5/18/2022 by W.F.
+UNEP-WCMC and IUCN (2022), Protected Planet: The World Database on Protected Areas (WDPA) and World Database on Other Effective Area-based Conservation Measures (WD-OECM) [Online], May 2022, Cambridge, UK: UNEP-WCMC and IUCN. Available at: www.protectedplanet.net.
+
+FUTURE: 
+Update with protection levels (proposed -> implemented, lightly - fully protected) from 
+https://mpatlas.org/; https://marine-conservation.org/mpatlas/download/
+
+```{r}
+# source(here("globalprep", "analysis", "coral-counterfactual","03-lrp-join-mpa.R"))
+allreefs_mpa <- read_sf(here("globalprep","analysis","coral-counterfactual",
+          "outputs", "allreefs_mpa.geojson")) %>% 
+    select(OBJECTID, WDPA_MPA, IUCN_CAT, NO_TAKE, STATUS, geometry)
+
+allreefs_mpa
+          
+```
+
+
+## Load GSGFM Seafloor
+
+Seafloor Geomorphic Features Map by Harris, P.T., Macmillan-Lawler, M., Rupp, J. and Baker, E.K. 2014. Geomorphology of the oceans. Marine Geology, 352: 4-24. is licensed under a Creative Commons Attribution 4.0 International License
+
+Notes: 
+- W. Friedman downloaded these data (with permission) on 5/26/2021 from https://www.bluehabitats.org/?page_id=58
+- There are many other layers in this dataset; only loading shelf (plus classification), slope, abyss, and canyons.
+
+```{r}
+#source(here("globalprep", "analysis", "coral-counterfactual","03-lrp-join-seafloor.R"))
+
+allreefs_gsgfm <- read_rds(here("globalprep", "analysis", "coral-counterfactual",
+                      "outputs","allreefs_seafloor.RDS"))
+
+allreefs_gsgfm
+```
+
+
+## Load SST
+
+```{r}
+# Load summary product from NOAA CRW. Use for sst_max, sst_range, sst_stdv
+# source(here("globalprep", "analysis", "coral-counterfactual","03-lrp-join-sst.R"))
+allreefs_sst_crw <- st_read(here("globalprep","analysis","coral-counterfactual",
+                  "outputs", "allreefs_sst.geojson")) %>% 
+  as_tibble() %>% 
+  select(OBJECTID, starts_with("sst_")) %>% 
+  rename_at(vars(starts_with("sst_")), paste0, "_crw")
+
+allreefs_sst_crw
+
+# Load new sst summary statistics from global-daily-sst data. Use for sst_skewness, kurtosis, etc.
+# source(here("globalprep", "analysis", "coral-counterfactual","03-lrp-join-noaa-sst.R"))
+allreefs_sst_new <- read_csv(here("globalprep","analysis","coral-counterfactual", 
+                            "outputs","allreefs_noaa_sst_stats.csv")) %>% 
+  mutate(OBJECTID = as.character(objectid)) %>% 
+  select(-c(objectid)) %>% 
+  select(OBJECTID, starts_with("sst_")) %>% 
+  mutate(sst_range = sst_max - sst_min)
+
+allreefs_sst_new
+
+# Join 
+allreefs_sst <- allreefs_sst_crw %>% 
+  left_join(allreefs_sst_new, by = "OBJECTID")
+
+allreefs_sst %>% skim()
+```
+
+## Load Dissolved Oxygen & calcite
+
+```{r}
+# source(here("globalprep", "analysis", "coral-counterfactual","03-lrp-join-DO-calcite.R"))
+
+allreefs_DO_calcite <- st_read(here("globalprep","analysis","coral-counterfactual",
+                  "outputs", "allreefs_DO_calcite.geojson"))
+
+allreefs_DO_calcite
+```
+
+## Load PAR, pH, diffuse attenuation
+```{r}
+# source(here("globalprep", "analysis", "coral-counterfactual","03-lrp-join-DO-calcite.R"))
+
+allreefs_par_ph_atn <- st_read(here("globalprep","analysis","coral-counterfactual",
+                  "outputs", "allreefs_par_pH_atn.geojson"))
+
+allreefs_par_ph_atn
+```
+
+## Load DHW Events
+```{r}
+# source(here("globalprep", "analysis", "coral-counterfactual","03-lrp-join-dhw.R"))
+
+allreefs_dhw <- st_read(here("globalprep","analysis","coral-counterfactual", "outputs", 
+          "allreefs_dhw.geojson"))
+
+allreefs_dhw
+```
+
+## Load DHW_max_cumul
+- DHW_max_cumul = sum of annual max DHW 
+- Extracted by 01-format-noaa-dhw-annual.py
+- Formatted to join with GCC data here
+
+
+```{r}
+# load data
+allreefs_dhw_max <- read_csv(here("globalprep","analysis","coral-counterfactual",
+                         "outputs","allreefs_dhw_annualmax_cumulative.csv")) %>% 
+  mutate(OBJECTID = as.character(OBJECTID)) %>% 
+  rename(dhw_max_cumul = dhw_max_cuml)
+
+allreefs_dhw_max$dhw_max_cumul %>% hist()
+
+allreefs_dhw_max
+
+```
+
+
+## Load effluent data
+- Run the script below to return a joined lrp and effluent table ('allreefs_effluent')
+- Not currently running (not using in current model)
+
+```{r}
+#source(here("globalprep", "analysis", "coral-counterfactual","03-lrp-join-effluent.R"))
+
+allreefs_effluent <- read_sf(here("globalprep","analysis","coral-counterfactual",
+          "outputs", "allreefs_effluent.geojson")) %>% 
+  select(OBJECTID, starts_with("effluent"), geometry)
+
+allreefs_effluent
+
+```
+
+## Load MSEC Variables 
+Formatted by "01-format-msec.py"
+
+```{r}
+gcc_reef_area <- read_csv(here("globalprep","analysis","coral-counterfactual",
+          "outputs","allreefs_reef_area_15km.csv"), 
+          col_types = "cd", 
+          na = c("NA", "NaN", "nan"))
+
+gcc_reef_area
+
+gcc_npp_mean <- read_csv(here("globalprep","analysis","coral-counterfactual",
+          "outputs","allreefs_npp_mean.csv"), 
+          col_types = "cd", 
+          na = c("NA", "NaN", "nan"))
+
+gcc_npp_mean
+
+
+gcc_npp_sd <- read_csv(here("globalprep","analysis","coral-counterfactual",
+          "outputs","allreefs_npp_sd.csv"), 
+          col_types = "cd", 
+          na = c("NA", "NaN", "nan"))
+
+gcc_npp_sd
+
+gcc_wave_energy <- read_csv(here("globalprep","analysis","coral-counterfactual",
+          "outputs","allreefs_wave_energy_mean.csv"), 
+          col_types = "cd", 
+          na = c("NA", "NaN", "nan"))
+
+gcc_wave_energy
+
+# simplify; join to one data table
+gcc_msec <- gcc_reef_area %>% 
+  left_join(gcc_npp_mean) %>% 
+  left_join(gcc_npp_sd) %>% 
+  left_join(gcc_wave_energy)
+
+gcc_msec
+
+```
+
+
+
+# Create final analysis table
+- Update LRP with the extracted values
+- Save / export for use in 08-global-predict.Rmd
+
+```{r}
+
+gcc_centroids <- read_csv(here("globalprep","analysis","coral-counterfactual",
+          "outputs","allreefs_centroids.csv"), 
+          col_types = "cdd")
+
+
+gcc_country <- allreefs_country %>% 
+  as_tibble %>% 
+  select(OBJECTID, eez, country_iso, country) %>% 
+  mutate(eez = factor(eez), 
+         country_iso = factor(country_iso),
+         country = factor(country))
+
+gcc_meow <- allreefs_meow %>% 
+  as_tibble %>% 
+  select(OBJECTID, realm, province, ecoregion) %>% 
+  mutate(realm = factor(realm), 
+         province = factor(province),
+         ecoregion = factor(ecoregion))
+
+# currently setting all recognized 'mpas' to 'restricted' based on analysis in
+# Horta e Costa, Claudet, et al 2016. 
+# http://dx.doi.org/10.1016/j.marpol.2016.06.021
+# May be able to update or assign IUCN Cat's 1a, 1b to 'high' and others to 'moderate'
+# Check with Joachim. what about 'Not Applicable'? See: 
+# allreefs_mpa$IUCN_CAT %>% tabyl()
+
+gcc_mpa <- allreefs_mpa %>% 
+  as_tibble() %>% 
+  filter(WDPA_MPA == 1) %>% 
+  select(OBJECTID, WDPA_MPA, IUCN_CAT, NO_TAKE, STATUS) %>% 
+  mutate(mgmt_notake = if_else(NO_TAKE == "All", 1, 0), 
+         mgmt_openaccess = if_else(NO_TAKE == "None", 1, 0),
+         mgmt_restricted = if_else(NO_TAKE == "Part", 1, 0),
+         status_ok = if_else(STATUS == "Proposed", 0, 1)) %>% 
+  filter(status_ok == 1) %>%  
+  mutate(MPA_highest = case_when(mgmt_notake == 1 ~ "no take",
+                                 mgmt_openaccess == 1 ~ "open access",
+                                 mgmt_restricted == 1 ~ "restricted",
+                                 TRUE ~ "not reported")) %>% 
+  mutate(MPA_highest = factor(MPA_highest)) %>% 
+  # filter to one value per cell; take highest. 
+  arrange(-mgmt_notake, -mgmt_restricted,-mgmt_openaccess) %>% 
+  distinct(OBJECTID, .keep_all = TRUE)
+
+gcc_mpa %>% tabyl(MPA_highest) # no take = 3972
+
+gcc_aca <- allreefs_aca %>% 
+  mutate(aca_top_geo_simple = factor(aca_top_geo_simple))
+
+gcc_sst <- allreefs_sst
+  
+gcc_effluent <- allreefs_effluent %>% 
+  as_tibble() %>% 
+  select(OBJECTID, contains("effluent_"))
+
+gcc_depth <- allreefs_depth %>% 
+  as_tibble() %>% 
+  select(OBJECTID, gebco_depth)
+
+gcc_do_calcite <- allreefs_DO_calcite %>% 
+  as_tibble() %>% 
+  select(OBJECTID, dissolved_oxygen, calcite)
+
+gcc_par_ph_atn <- allreefs_par_ph_atn %>% 
+  as_tibble() %>% 
+  select(OBJECTID, diffuse_atn_max, pH_mean, par_max, currents_velocity_mean)
+
+gcc_dhw <- allreefs_dhw %>% 
+  as_tibble() %>% 
+  select(OBJECTID, dhw0, dhw4)
+
+gcc_dhw_cuml <- allreefs_dhw_max
+
+gcc_gsgfm <- allreefs_gsgfm
+
+
+# Construct model table
+gcc_df_full <- allreefs %>%
+  as_tibble() %>%
+  select(OBJECTID, geometry, region = Region,
+         grav_NC_raw, pop_count_raw, num_ports_raw, reef_value_raw, 
+         sediment_raw, nutrient_raw, score, scoreth, scoretr, scorecn, scorecy, 
+         cumul_score, grav_NC_raw, num_ports_raw, pop_count_raw, reef_value_raw,
+         nutrient_raw, sediment_raw) %>% 
+  mutate(region = factor(region)) %>% 
+  left_join(gcc_centroids) %>% 
+  left_join(gcc_country) %>%
+  left_join(gcc_meow) %>% 
+  left_join(gcc_aca) %>% 
+  left_join(gcc_depth) %>% 
+  left_join(gcc_mpa[c("OBJECTID", "WDPA_MPA","MPA_highest")]) %>% 
+  left_join(gcc_sst) %>% 
+  left_join(gcc_dhw) %>%
+  left_join(gcc_dhw_cuml) %>% 
+  left_join(gcc_effluent) %>% 
+  left_join(gcc_do_calcite) %>% 
+  left_join(gcc_par_ph_atn) %>%
+  left_join(gcc_gsgfm) %>%
+  left_join(gcc_msec) %>% 
+  rename(ph_mean = pH_mean) %>% 
+  clean_names()
+
+gcc_df_full
+
+gcc_df_full %>% select(-geometry) %>% skim()
+
+gcc_df_full %>% names()
+```
+
+## Trim and format final analysis table
+- Load and align coral cover data
+- Pre-format variables used in model (mgmt_simple / mgmt_highest); not logs tho.
+- This table is output for KNB
+- HERE! 
+
+```{r}
+# observed coral cover
+cc_dat <- read_rds(here("globalprep","analysis","coral-counterfactual","outputs",
+                        "allreefs_coralcover.RDS")) %>% 
+  as_tibble() %>% 
+  select(OBJECTID, geometry, pct_hardcoral:method_cat) %>% 
+  clean_names()
+
+gcc_df <- gcc_df_full %>% 
+  left_join(cc_dat %>% select(objectid, starts_with("pct_hardcoral"), 
+                              starts_with("sample_yr"),
+                              mgmt_highest, method_cat, depth_avg)) %>% 
+  mutate(mgmt_highest = case_when(
+    (mgmt_highest == "no take" | mpa_highest == "no take") ~ "no take",
+    (mgmt_highest == "restricted" | mpa_highest == "restricted") ~ "restricted",
+    (mgmt_highest == "open access" | mpa_highest == "open access") ~ "open access", 
+    TRUE ~ "unknown"),
+    mgmt_highest = factor(mgmt_highest, levels = c("no take", "restricted",
+                                                   "open access", "unknown"))) %>% 
+  mutate(method_cat = if_else(method_cat == "unknown", "pitlitbleach",method_cat), 
+         method_cat = factor(method_cat)) %>% 
+  rename(climate_score = score,
+         sst_var = sst_stdv_crw,
+         sst_max = sst_max_crw,
+         sst_range = sst_range_crw,
+         sst_var_alt = sst_stdv,
+         sst_max_alt = sst_max,
+         sst_range_alt = sst_range,
+         score_cn = scorecn,
+         score_cy = scorecy) %>% 
+  mutate(region = factor(region),
+         country = factor(country)) %>% 
+  select(objectid, geometry, region, country, country_iso, eez,
+         realm, province, ecoregion,
+         latitude, longitude, gebco_depth,
+         starts_with("pct_hardcoral"),starts_with("sample_yr"),
+         pct_hardcoral, pct_hardcoral_nsurveys, method_cat,
+         dhw_max_cumul, dhw0, dhw4, #scoretr, scoreth, climate_score, cumul_score, 
+         sst_annualtrend, sst_kurtosis, sst_max, sst_range, sst_skewness, sst_var, 
+         aca_pr_bank, aca_pr_crest, aca_pr_lagoon, aca_pr_seagrass, aca_pr_slope,
+         aca_top_geo_simple, 
+         calcite, currents_velocity_mean, diffuse_atn_max, dissolved_oxygen, gs_vr_score,
+         npp_mean, npp_sd, par_max, ph_mean, reef_area_15km,
+         score_cn, score_cy, wave_energy_mean,
+         effluent_open_n, effluent_septic_n, effluent_total_n, effluent_treated_n,
+         nutrient_raw, sediment_raw, 
+         grav_nc_raw, mgmt_highest, num_ports_raw, pop_count_raw, reef_value_raw)
+
+gcc_df %>% names %>% sort()
+
+# create spatial version:
+gcc_sf <- gcc_df %>% 
+  st_as_sf(crs=4326)
+
+```
+
+### Impute missing values 
+
+- Impute missing gravity for model cells
+- Find all cells within 50km
+- Get mean of gravity within any of those cells (na.rm=T)
+- TODO: Repeat this for all gcc cells (on aurora / in parallel; memory exhausted error)
+
+```{r}
+library(nngeo)
+
+missing_grav <- gcc_sf %>% filter(is.na(grav_nc_raw))
+has_grav <- gcc_sf %>% filter(!is.na(grav_nc_raw))
+
+# get index of all cells within 50km of those missing gravity
+# index <- st_is_within_distance(missing_grav %>% st_transform(crs = 3857), 
+#                                gcc_sf %>% st_transform(crs = 3857), 
+#                                dist = 50000)
+# output <- gcc_sf %>% 
+#   mutate(grav_nc_raw_filled = ifelse(is.na(grav_nc_raw),
+#                              apply(index, 1, 
+#                                    function(i){mean(.$grav_nc_raw[i], na.rm = T)}),
+#                              grav_nc_raw))
+
+# re-do; want the value of the nearest cell; up to 50km in distance.
+# function: st_nn(a, b, k = 1, returnDist = T)
+# takes a few minutes... 
+index = st_nn(missing_grav %>% st_transform(crs = 3857),
+              has_grav %>% st_transform(crs = 3857),
+              k = 1, 
+              maxdist = 50000, #50km max
+              returnDist = F)
+
+index_map <- missing_grav %>% select(objectid) %>% 
+  mutate(grav_row = as.matrix(index)) %>% 
+  unnest(grav_row)
+
+index_map["grav_nc_raw_filled"] = has_grav$grav_nc_raw[index_map$grav_row]
+
+output <- gcc_sf %>% 
+  left_join(index_map %>% as_tibble() %>% select(objectid, grav_nc_raw_filled), 
+            by = "objectid") %>% 
+  mutate(grav_nc_raw_new = case_when(is.na(grav_nc_raw) ~ grav_nc_raw_filled, 
+                                     !is.na(grav_nc_raw) ~grav_nc_raw, 
+                                     TRUE ~ NA))
+
+output %>% 
+  select(objectid,grav_nc_raw, grav_nc_raw_filled,grav_nc_raw_new) %>% 
+  skim()
+
+# save and check filled values:
+# geojson
+fn = here("globalprep","analysis","coral-counterfactual",
+          "outputs", "allreefs_gravity_filled.geojson")
+
+if(file.exists(fn)){
+  file.remove(fn)
+}
+
+st_write(output, dsn = fn, driver = "GeoJSON", append = F)
+
+# update gcc tables:
+gcc_sf <- output %>% 
+  mutate(grav_nc_raw = grav_nc_raw_new) %>% 
+  select(-c(grav_nc_raw_new, grav_nc_raw_filled))
+
+gcc_df <- gcc_sf %>% 
+  as_tibble()
+
+#rm(output, missing_grav, index)
+```
+
+
+### Variable checks
+
+```{r}
+
+# INCLUDE THIS IN KNB METADATA
+gcc_df %>% select(-geometry) %>% skim()
+
+
+vlist <- gcc_df %>% select_if(is.numeric) %>% names() %>% sort()
+for(v in vlist){
+  print(v, maxmin(gcc_df[,v]))
+}
+```
+
+## Save analysis table
+```{r}
+
+## Save extended LRP dataset as RDS
+gcc_df %>% 
+  write_rds(file = here("globalprep","analysis","coral-counterfactual",
+                        "outputs", "allreefs_gcc.RDS"))
+
+## Save extended LRP dataset as geojson, and SF obj.
+
+
+gcc_sf %>% 
+  write_rds(file = here("globalprep","analysis","coral-counterfactual",
+                        "outputs", "allreefs_gcc_sf.RDS"))
+
+# geojson
+fn = here("globalprep","analysis","coral-counterfactual",
+          "outputs", "allreefs_gcc.geojson")
+
+if(file.exists(fn)){
+  file.remove(fn)
+}
+
+st_write(gcc_sf, dsn = fn, driver = "GeoJSON", append = F)
+```
+
+
+# Save this workspace
+```{r}
+save.image(here("globalprep","analysis","coral-counterfactual",
+                "03-prep-global-gridded.Rdata"))
+
+```
+
+
+# Data summaries
+```{r}
+gcc_df %>% skim()
+
+gcc_df %>% filter(!is.na(pct_hardcoral)) %>% skim()
+
+# number of ecoregions, provinces
+gcc_df$province %>% tabyl()
+gcc_df$province %>% na.omit()%>% unique() %>% length() # 39 / 62 global provinces
+gcc_df$ecoregion %>% na.omit()%>% unique() %>% length() # 115 / 232 global ecoregions
+
+gcc_df %>% 
+  filter(!is.na(pct_hardcoral)) %>% 
+  pull(ecoregion) %>% na.omit() %>% 
+  unique() %>% length()
+
+#29/39 provinces 
+#69/115 ecoregions
+
+
+```
+

@@ -1,0 +1,435 @@
+---
+title: "02-prep-coralcover-gridded.Rmd"
+author: "Whitney Friedman"
+date: "5/16/2022"
+output:
+  rmdformats::downcute:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango  
+
+---
+# Combine datasets for use in coral counterfactual
+NEW: updated from 03-combine-datasets.Rmd on 5/16/2022. 
+Averaging coral cover to 5km grids
+
+# Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load libraries
+
+```{r message=FALSE, warning=FALSE}
+library(here)
+source(here("globalprep","analysis","coral-counterfactual", "00-load-cc-libraries.R"))
+source(here("globalprep","analysis","coral-counterfactual", "00-load-cc-functions.R"))
+
+```
+
+
+# Load & Extract Data
+
+# 1. Response - Coral cover
+## 1a. MERMAID
+- Source: MERMAID
+- Variables: country, site, pct_cover_hard_coral_combined, depth_avg, aca_geomorphic, management_rules
+- ACA alternative: Extract from ACA directly - [see tutorial here]
+(https://github.com/CoralMapping/tutorials/blob/main/WMS/eez_percent_distribution_tutorial.ipynb)
+```{r}
+# Load Mermaid data
+source(here("globalprep","analysis","coral-counterfactual","01-format-mermaid-public.R"))
+
+## Keep only cols used for this analysis
+## Keep only data collected >= 2010
+
+dat_mer <- cc_mermaid %>% 
+  select(country, site, latitude, longitude, 
+         sample_date, year,
+         pct_cover_hard_coral_combined, 
+         depth_avg, aca_geomorphic, management_rules, 
+         db, id, cc_id) %>% 
+  filter(year >= 2010) %>% 
+  mutate(mgmt_simple = case_when(management_rules == "no take" ~ "no take",
+                                 management_rules == "open access" ~ "open access",
+                                 str_detect(management_rules, "restriction") ~ "restricted", 
+                                 str_detect(management_rules, "periodic") ~ "restricted")) %>%
+  mutate(aca_geomorphic = na_if(aca_geomorphic, "NA"))
+  
+dat_mer
+
+# Some data checks ...
+dat_mer %>% tabyl(management_rules)
+dat_mer %>% tabyl(mgmt_simple)
+dat_mer %>% tabyl(aca_geomorphic)
+
+# n surveys
+dat_mer %>% tabyl(country, mgmt_simple) %>% adorn_totals()
+
+# n sites
+dat_mer %>% 
+  distinct(country, site, .keep_all = T) %>%
+  tabyl(country, mgmt_simple) %>% 
+  adorn_totals()
+
+```
+
+###  Update as needed
+- For sites surveyed over multiple years; AVERAGE
+```{r}
+
+dat_mer1 <- dat_mer
+
+# 1. Convert all FJ "open access" sites to "restricted" 
+dat_mer1 <- dat_mer1 %>% 
+  mutate(mgmt_simple = 
+           case_when((country == "Fiji" & mgmt_simple == "open access") ~ "restricted",
+                     TRUE ~ mgmt_simple)) %>% 
+  rename(method = db) %>% 
+  mutate(db = "mermaid") %>% 
+  rename(pct_hardcoral = pct_cover_hard_coral_combined)
+
+
+# 2. Read in updated mgmt category file from Emily (1/10/2022)
+dat_mer_fix <- read_csv(here("globalprep","analysis", "coral-counterfactual","intermediate-files",
+                              "cc-sites-multiple-mgmt-categories-esd.csv")) %>% 
+   select(country,site,longitude,latitude, mgmt_use) %>% 
+   mutate(mgmt_replace = 1)
+
+# Replace values as indicated, final updates: 
+dat_mer1 <- dat_mer1 %>% 
+  left_join(dat_mer_fix, by = c("country","site","longitude","latitude")) %>% 
+   mutate(mgmt_simple = case_when(mgmt_replace == 1 ~ mgmt_use, 
+                                  TRUE ~ mgmt_simple)) %>% 
+   select(-mgmt_replace, mgmt_use)
+
+#1929 surveys
+dat_mer1 %>% 
+  tabyl(mgmt_simple) %>% 
+  adorn_totals()
+```
+
+
+## 1b. Indo-Pacific / NEE data
+- Import cc data & co-variates from Darling et al 2019
+- Align with counterfactual model data (ccmod_df)
+- Variables: 
+-- Coral cover
+-- country, site, pct_cover_hard_coral_combined, depth_avg, aca_geomorphic, management_rules
+
+Load Darling et al 2019 ('NEE') data: 
+```{r}
+dat_nee <- read_csv(here("globalprep","analysis", "coral-counterfactual","data_dl",
+                         "Darling_etal_NEE","coral-model-data.csv")) %>% 
+  clean_names()
+
+dat_nee <- dat_nee %>% mutate(cc_id = seq(1:nrow(dat_nee)), 
+         cc_id = str_c("nee_",cc_id))
+
+dat_nee
+
+# 2584 surveys; 2010-2016
+dat_nee %>% tabyl(management) %>% adorn_totals()
+dat_nee$year %>% hist() # 2010-2016
+dat_nee %>% tabyl(country)
+
+```
+
+Select variables
+```{r}
+
+dat_nee1 <- dat_nee %>% 
+  select(country, site, longitude, latitude, 
+         sumcover, year, depth_m, habitat, management,
+         method, cc_id)
+
+# rename to combine with mermaid: 
+dat_nee1 <- dat_nee1 %>% 
+  rename(depth_avg = depth_m, 
+         pct_hardcoral = sumcover) %>% 
+  mutate(db = "darling_etal_2019",
+         mgmt_simple = case_when(management == "No-take" ~ "no take",
+                                 management == "Fished" ~ "open access",
+                                 management == "Restricted" ~ "restricted")) %>% 
+  select(-management)
+
+# Convert all FJ 'open access' to 'restricted'
+dat_nee1 <- dat_nee1 %>% 
+    mutate(mgmt_simple = 
+           case_when((country == "Fiji" & mgmt_simple == "open access") ~ "restricted",
+                     TRUE ~ mgmt_simple))
+
+dat_nee1 %>% tabyl(country,mgmt_simple)
+
+# Check for dupes
+# Only 2 duplicate sites (Singapore; US); lat/lons, methods, and mgmt differ. leave for now.
+dat_nee1 %>% get_dupes(country,site)
+
+dat_nee1 %>% skim()
+dat_nee1 %>% tabyl(mgmt_simple) %>% adorn_totals() # 2584
+dat_nee1 %>% tabyl(db)
+```
+
+## 1c. UQ photo quadrat data
+
+```{r}
+source(here("globalprep","analysis","coral-counterfactual", "01-format-uq.R"))
+dat_uq
+
+dat_uq1 <- dat_uq %>% 
+  mutate(site = str_c("uq",surveyid, sep = "_"))
+
+dat_uq1
+```
+
+## 1d. ETP data
+Adds: 32 sites, 49 observations
+
+```{r}
+source(here("globalprep","analysis","coral-counterfactual", "01-format-etp.R"))
+# use dat_etp0 instead of (averaged) dat_etp
+
+dat_etp1 <- dat_etp0 %>% 
+  mutate(db = "romero_torres_etal_2020",
+         method = "unknown") %>% 
+  rename(pct_hardcoral = coral_cover,
+         latitude = lat, 
+         longitude = lon,
+         year = survey_year) %>% 
+  select(db, method, country, site, latitude, longitude, year, pct_hardcoral)
+
+dat_etp1 %>% tabyl(year) %>% 
+  adorn_totals()
+
+dat_etp1
+
+```
+
+
+# 2. Create "ccmod_df" with combined MERMAID, Darling et al NEE, UQ, and ETP data
+
+```{r}
+# 5422 surveys 
+ccmod_df <- dat_mer1 %>% 
+  bind_rows(dat_nee1) %>% 
+  bind_rows(dat_uq1) %>%
+  bind_rows(dat_etp1) %>% 
+  arrange(country, site, year) %>% 
+  select(db, country, site, latitude, longitude, depth_avg,
+         year, method, pct_hardcoral, mgmt_simple)
+
+ccmod_df <- ccmod_df %>% 
+  mutate(ccmod_id = seq(1:nrow(ccmod_df)), 
+         ccmod_id = str_c("ccmod_",ccmod_id), 
+         method = str_to_lower(method), 
+         method_cat = case_when(method == "bleaching" ~ "pitlitbleach",
+                                method == "lit" ~ "pitlitbleach", 
+                                method == "pit" ~ "pitlitbleach",
+                                method == "unknown" ~ "pitlitbleach",
+                                method == "photo" ~ "photo",
+                                TRUE ~ NA_character_))
+
+# Table S1 - # of surveys
+ccmod_df %>% tabyl(db, method) %>% adorn_totals() #%>% view()
+ccmod_df %>% tabyl(db, method_cat) %>% adorn_totals() #%>% view()
+
+# Table S2 - survey years (2010 - 2021)
+ccmod_df %>% tabyl(year) #%>% view()
+
+# CHECK THESE. These are from combined MERMAID surveys; need to figure out best way to account for these differences.
+ccmod_df %>% tabyl(mgmt_simple, db)
+
+# Check: all FIJI sites listed as "open access" should be "restricted" 
+ccmod_df %>% tabyl(country, mgmt_simple) %>% filter(country == "Fiji")
+  
+
+ccmod_df %>% skim() # 5422 surveys
+
+ggplot(ccmod_df, aes(x = pct_hardcoral, fill = db))+
+  geom_histogram()+
+  facet_wrap(~db, scales = "free_y")
+
+#ggsave(here("globalprep","analysis","coral-counterfactual","plots", "pct_hardcoral_dist_db.png"), width = 12, height = 8)
+
+
+```
+
+
+# 3. Average %CC by grid cell
+
+## 3a. Load LRP cells
+```{r}
+
+# load data info
+allreefs_info <- read_excel(here("globalprep", "analysis", "coral-counterfactual","data_dl",
+          "wcs-local-reef-pressures","key.xlsx"))
+
+allreefs_info
+
+# load dataset (original allreefs.Rdata transformed using "01-format-allreefs.R")
+
+load(here("globalprep", "analysis",
+          "coral-counterfactual","data_dl",
+          "wcs-local-reef-pressures", "allreefs_WGS84.RData"))
+
+allreefs
+```
+
+# 4. Spatial join & summarise
+
+```{r}
+
+ccmod_sf <- ccmod_df %>% 
+  st_as_sf(coords = c("longitude","latitude"),
+           crs = 4326)
+
+# spatial join coral cover data & lrp
+# 1672 cells with coral cover data (of 54596 coral reef cells) -- 3.06% of reef cells
+# 712 cells have 1 survey associated; 959 cells have > 1 survey
+ccmod_5km_df <- st_join(ccmod_sf, allreefs) %>% 
+  as_tibble() %>% 
+  drop_na(OBJECTID) %>% 
+  group_by(OBJECTID) %>% 
+  summarise(pct_hardcoral = median(pct_hardcoral, na.rm =T),
+            pct_hardcoral_min = min(pct_hardcoral, na.rm = T),
+            pct_hardcoral_max = max(pct_hardcoral, na.rm = T),
+            pct_hardcoral_nsurveys = n(),
+            depth_avg = median(depth_avg, na.rm = T),
+            sample_yr_median = median(year, na.rm = T),
+            sample_yr_min = min(year, na.rm = T),
+            sample_yr_max = max(year, na.rm = T),
+            mgmt_simple_comb = paste(unique(mgmt_simple[!is.na(mgmt_simple)]), 
+                                collapse = "; "),
+            method_comb = paste(unique(method_cat[!is.na(method_cat)]), 
+                                collapse = "; "),
+            method_all  = paste(method_cat, collapse = "; ")) %>% 
+  ungroup() %>% 
+  mutate(mgmt_highest = case_when(str_detect(mgmt_simple_comb, "no take") ~ "no take", 
+                                  str_detect(mgmt_simple_comb, "restricted") ~ "restricted",
+                                  str_detect(mgmt_simple_comb, "open access") ~ "open access",
+                                             TRUE ~ NA_character_)) %>% 
+  select(-mgmt_simple_comb, -method_all) %>% 
+  mutate(method_cat = if_else(str_detect(method_comb, ";"), "mixed", method_comb))
+
+ccmod_5km_df %>% skim()
+ccmod_5km_df %>% tabyl(mgmt_highest)
+ccmod_5km_df %>% tabyl(method_comb)
+ccmod_5km_df %>% tabyl(method_cat)
+ccmod_5km_df %>% tabyl(year_avg)
+ccmod_5km_df %>% filter(pct_hardcoral_nsurveys == 1) %>% nrow()
+ccmod_5km_df %>% filter(pct_hardcoral_nsurveys > 1) %>% nrow()
+
+ccmod_5km_df %>% filter(pct_hardcoral_nsurveys > 1,
+                        sample_yr_min != sample_yr_max) %>% view()
+
+
+
+# MGMT_SIMPLE: CHECK AND UPDATE MERMAID SITES! HERE! ALSO: ADD 'UNKNOWN' and 'restricted' for sites with mixed management categories.
+
+lrp_cc <- allreefs %>% 
+  as_tibble() %>% 
+  left_join(ccmod_5km_df, by = "OBJECTID")
+
+lrp_cc_sf <- 
+  lrp_cc %>% 
+  st_as_sf(crs = 4326)
+
+```
+
+# 5. Save things
+
+## Save combined site-based data
+```{r}
+# Save table
+ccmod_df %>% 
+  write_rds(here("globalprep","analysis","coral-counterfactual","outputs",
+             "cc_surveys_combn.RDS"))
+
+# Save geojson
+fn = here("globalprep","analysis","coral-counterfactual", "outputs", 
+          "cc_surveys_combn.geojson")
+
+if(file.exists(fn)){
+  file.remove(fn)
+}
+
+st_write(ccmod_sf, dsn = fn, driver = "GeoJSON", append = F,layer = "cc_surveys")
+
+```
+
+## Save coral cover data aligned with 5km LRP grids
+```{r}
+# RDS
+lrp_cc_sf %>% 
+  write_rds(here("globalprep","analysis","coral-counterfactual",
+                              "outputs","allreefs_coralcover.RDS"))
+
+# geojson
+fn = here("globalprep","analysis","coral-counterfactual", "outputs", 
+          "allreefs_coralcover.geojson")
+
+if(file.exists(fn)){
+  file.remove(fn)
+}
+
+st_write(lrp_cc_sf, dsn = fn, driver = "GeoJSON", append = F)
+```
+
+## LRP Centroids
+Save LRP (allreefs) centroids as *.csv
+- Used in a lot of the 01-format scripts
+
+```{r}
+allreefs_centroids <- allreefs %>% 
+  select(OBJECTID) %>% 
+  st_centroid()
+
+allreefs_centroids
+
+allreefs_coords <- st_coordinates(allreefs_centroids$geometry) %>% 
+  bind_cols(OBJECTID = allreefs_centroids$OBJECTID) %>% 
+  rename(longitude = X, 
+         latitude = Y) %>% 
+  select(OBJECTID, longitude, latitude)
+
+allreefs_coords %>% 
+  write_csv(here("globalprep","analysis","coral-counterfactual",
+          "outputs","allreefs_centroids.csv"))
+
+# centroids for LRP cells with coral cover data
+allreefs_cc_centroids <- lrp_cc_sf %>% 
+  filter(!is.na(pct_hardcoral)) %>% 
+  select(OBJECTID) %>% 
+  st_centroid()
+
+
+allreefs_cc_coords <- st_coordinates(allreefs_cc_centroids$geometry) %>% 
+  bind_cols(OBJECTID = allreefs_cc_centroids$OBJECTID) %>% 
+  rename(longitude = X, 
+         latitude = Y) %>% 
+  select(OBJECTID, longitude, latitude)
+
+allreefs_cc_coords %>% 
+  write_csv(here("globalprep","analysis","coral-counterfactual",
+          "outputs","allreefs_cc_centroids.csv"))
+  
+```
+
+## Outputs for Julia
+
+- Lat / Long, database, cell ID for the ~5,400 coral cover sites we have assembled so far
+- Example code for aligning to LRP grids (in R, library 'sf')
+- Leaflet examples
+
+```{r}
+# sites: 
+cc_sites <- ccmod_df %>% 
+  select(db, country, site, latitude, longitude) %>% 
+  distinct()
+
+cc_sites %>% write_csv(here("globalprep","data-requests","julia",
+                            "cc_sites.csv"))
+```
+
